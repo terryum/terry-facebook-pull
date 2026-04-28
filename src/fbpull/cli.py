@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import typer
 from dotenv import load_dotenv
@@ -17,6 +18,9 @@ app = typer.Typer(help="Facebook DYI export → Obsidian pipeline")
 
 def _bootstrap(no_llm: bool = False) -> None:
     load_dotenv()
+    profile_env = os.environ.get("CLAUDE_PROFILE_ENV")
+    if profile_env and Path(profile_env).expanduser().exists():
+        load_dotenv(Path(profile_env).expanduser(), override=False)
     if no_llm:
         os.environ["FBPULL_NO_LLM"] = "1"
     ensure_dirs()
