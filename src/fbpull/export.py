@@ -72,6 +72,17 @@ def run() -> dict[str, int]:
     if neighbors_path.exists():
         neighbors = json.loads(neighbors_path.read_text(encoding="utf-8"))
 
+    # Pre-build cluster_id → synthesized slug map so each Archive note
+    # can wiki-link UP to its representative (Synthesized) note.
+    synth_slug_for: dict[int, str] = {}
+    synth_records: list[dict] = []
+    if synth_path.exists():
+        with synth_path.open(encoding="utf-8") as f:
+            for line in f:
+                rec = json.loads(line)
+                synth_records.append(rec)
+                synth_slug_for[rec["cluster_id"]] = rec["slug"]
+
     kept.sort(key=lambda r: (r["date"], r["post_id"]))
     used_names: set[str] = set()
     name_for: dict[str, str] = {}
@@ -99,11 +110,16 @@ def run() -> dict[str, int]:
             "fb_post_id": str(rec.get("post_id", "")),
             "source_path": rec.get("source_path", ""),
             "cluster_id": cid,
-            "summary": cls.get("summary", ""),
             "tags": tags,
         }
 
         body = rec["text"]
+
+        # Upstream link: Archive → Synthesized (cluster representative)
+        if cid is not None and cid in synth_slug_for:
+            body += f"\n\n## 속한 컨셉\n- [[{synth_slug_for[cid]}]]\n"
+
+        # Sideways links: Archive ↔ Archive (top-N similar)
         ns = neighbors.get(rec["post_id"], [])
         if ns:
             body += "\n\n## 비슷한 글\n"
@@ -117,40 +133,37 @@ def run() -> dict[str, int]:
 
     n_synth = 0
     synth_index: list[dict] = []
-    if synth_path.exists():
-        with synth_path.open(encoding="utf-8") as f:
-            for line in f:
-                rec = json.loads(line)
-                slug = rec["slug"]
-                tag = rec.get("primary_tag") or ""
-                tags = ["facebook", "synthesized"]
-                if tag:
-                    slug_tag = slugify(tag, allow_unicode=False, max_length=30)
-                    if slug_tag:
-                        tags.append(slug_tag)
-                meta = {
-                    "type": "synthesized",
-                    "source": "facebook",
-                    "visibility": "private",
-                    "created_at": str(date.today()),
-                    "cluster_id": rec["cluster_id"],
-                    "member_count": len(rec["member_post_ids"]),
-                    "tags": tags,
-                }
-                body = f"# {rec['title']}\n\n{rec['body']}\n\n## 멤버 글\n"
-                for pid in rec["member_post_ids"]:
-                    if pid in name_for:
-                        body += f"- [[{name_for[pid]}]]\n"
-                write_note(synthesized_dir() / f"{slug}.md", meta, body)
-                synth_index.append(
-                    {
-                        "slug": slug,
-                        "title": rec["title"],
-                        "cluster_id": rec["cluster_id"],
-                        "member_count": len(rec["member_post_ids"]),
-                    }
-                )
-                n_synth += 1
+    for rec in synth_records:
+        slug = rec["slug"]
+        tag = rec.get("primary_tag") or ""
+        tags = ["facebook", "synthesized"]
+        if tag:
+            slug_tag = slugify(tag, allow_unicode=False, max_length=30)
+            if slug_tag:
+                tags.append(slug_tag)
+        meta = {
+            "type": "synthesized",
+            "source": "facebook",
+            "visibility": "private",
+            "created_at": str(date.today()),
+            "cluster_id": rec["cluster_id"],
+            "member_count": len(rec["member_post_ids"]),
+            "tags": tags,
+        }
+        body = f"# {rec['title']}\n\n{rec['body']}\n\n## 멤버 글\n"
+        for pid in rec["member_post_ids"]:
+            if pid in name_for:
+                body += f"- [[{name_for[pid]}]]\n"
+        write_note(synthesized_dir() / f"{slug}.md", meta, body)
+        synth_index.append(
+            {
+                "slug": slug,
+                "title": rec["title"],
+                "cluster_id": rec["cluster_id"],
+                "member_count": len(rec["member_post_ids"]),
+            }
+        )
+        n_synth += 1
 
     idx_meta = {
         "type": "index",
