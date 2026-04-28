@@ -45,6 +45,35 @@ def _cluster_num(cid_str: str) -> int:
         return -1
 
 
+def _manifest_path():
+    return intermediate_dir() / "_manifest.json"
+
+
+def _read_manifest() -> dict[str, list[str]]:
+    p = _manifest_path()
+    if not p.exists():
+        return {"archive": [], "synthesized": []}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {"archive": [], "synthesized": []}
+
+
+def _delete_stale(prev: list[str], current: set[str], folder, suffix: str = ".md") -> int:
+    """Delete files this run wrote previously but isn't writing now.
+    User-added files (never in any manifest) are untouched.
+    """
+    deleted = 0
+    for name in prev:
+        if name in current:
+            continue
+        f = folder() / f"{name}{suffix}"
+        if f.exists():
+            f.unlink()
+            deleted += 1
+    return deleted
+
+
 def run() -> dict[str, int]:
     fb_root().mkdir(parents=True, exist_ok=True)
     archive_dir().mkdir(parents=True, exist_ok=True)
@@ -111,6 +140,17 @@ def run() -> dict[str, int]:
     name_for: dict[str, str] = {}
     for rec in kept:
         name_for[rec["post_id"]] = _unique_name(_archive_basename(rec), used_names)
+
+    # Stale cleanup: delete Archive/Synthesized files that we wrote in a
+    # previous run but aren't writing now. User-added files (never in any
+    # manifest) are untouched.
+    prev_manifest = _read_manifest()
+    new_archive_names = set(name_for.values())
+    new_synth_slugs = {rec["slug"] for rec in synth_records}
+    stale_archive = _delete_stale(prev_manifest.get("archive", []), new_archive_names, archive_dir)
+    stale_synth = _delete_stale(prev_manifest.get("synthesized", []), new_synth_slugs, synthesized_dir)
+    if stale_archive or stale_synth:
+        print(f"[export] cleaned stale files: archive={stale_archive} synthesized={stale_synth}")
 
     # Write Archive notes
     n_archive = 0
@@ -218,6 +258,20 @@ def run() -> dict[str, int]:
 
     # _index.md
     _write_index(n_archive, n_synth, synth_index, tax)
+
+    # Save manifest so the next run can clean its stale outputs.
+    _manifest_path().write_text(
+        json.dumps(
+            {
+                "archive": sorted(new_archive_names),
+                "synthesized": sorted(new_synth_slugs),
+                "generated_at": str(date.today()),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     print(f"[export] archive={n_archive} synthesized={n_synth} index=1 coverage={'1' if tax else '0'}")
     return {"archive": n_archive, "synthesized": n_synth}
