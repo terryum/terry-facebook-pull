@@ -8,7 +8,8 @@ _SYSTEM = """당신은 한 사람의 페이스북 글을 분석합니다. 각 �
 
 {
   "type": "thought | lesson | event | quote | announcement",
-  "primary_topic": "한국어 단어 1-3개 (예: '학습', '연구 방법론', '인간관계')",
+  "primary_topic": "한국어 단어 1-3개 (예: '학습', '리더십', '연구 방법론', '인간관계')",
+  "summary": "1-2문장의 한국어 요약. 글의 핵심 주장만. '나는' 같은 1인칭 자연스럽게.",
   "keep_for_synthesis": true | false
 }
 
@@ -25,11 +26,12 @@ _VALID = {"thought", "lesson", "event", "quote", "announcement"}
 
 def _stub(text: str) -> dict:
     n = len(text)
+    summary = text[:60].replace("\n", " ") + ("..." if n > 60 else "")
     if n < 100:
-        return {"type": "event", "primary_topic": "일상", "keep_for_synthesis": False}
+        return {"type": "event", "primary_topic": "일상", "summary": summary, "keep_for_synthesis": False}
     if n < 200:
-        return {"type": "thought", "primary_topic": "사고", "keep_for_synthesis": True}
-    return {"type": "lesson", "primary_topic": "성찰", "keep_for_synthesis": True}
+        return {"type": "thought", "primary_topic": "사고", "summary": summary, "keep_for_synthesis": True}
+    return {"type": "lesson", "primary_topic": "성찰", "summary": summary, "keep_for_synthesis": True}
 
 
 def classify_one(model: str, post_id: str, text: str, no_llm: bool) -> dict:
@@ -42,13 +44,15 @@ def classify_one(model: str, post_id: str, text: str, no_llm: bool) -> dict:
     if cached:
         return cached
 
-    result = llm.call_json(model, _SYSTEM, text, max_tokens=200)
+    result = llm.call_json(model, _SYSTEM, text, max_tokens=400)
     if result.get("type") not in _VALID:
         result["type"] = "thought"
     if "keep_for_synthesis" not in result:
         result["keep_for_synthesis"] = False
     if "primary_topic" not in result:
         result["primary_topic"] = ""
+    if "summary" not in result:
+        result["summary"] = ""
 
     llm.cache_put(cache_dir, key, result)
     return result

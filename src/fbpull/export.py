@@ -97,7 +97,9 @@ def run() -> dict[str, int]:
             "visibility": "private",
             "created_at": rec["date"],
             "fb_post_id": str(rec.get("post_id", "")),
+            "source_path": rec.get("source_path", ""),
             "cluster_id": cid,
+            "summary": cls.get("summary", ""),
             "tags": tags,
         }
 

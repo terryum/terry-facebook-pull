@@ -61,7 +61,10 @@ def normalize_one(raw: dict, source_path: str) -> dict | None:
 
 
 def iter_raw_files() -> Iterator[Path]:
-    yield from sorted(raw_dir().glob("*.json"))
+    """Recursively find all *.json under _raw/, so users can drop unzipped
+    DYI archives (which contain subfolders like posts/, your_posts_*) directly.
+    """
+    yield from sorted(raw_dir().rglob("*.json"))
 
 
 def run() -> int:
@@ -80,10 +83,11 @@ def run() -> int:
         else:
             continue
 
+        rel_path = str(f.relative_to(raw_dir()))
         for e in entries:
             if not isinstance(e, dict):
                 continue
-            r = normalize_one(e, f.name)
+            r = normalize_one(e, rel_path)
             if r is None or r["post_id"] in seen:
                 continue
             seen.add(r["post_id"])
