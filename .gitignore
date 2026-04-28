@@ -1,0 +1,41 @@
+# Secrets / env
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.python-version.local
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+/tmp-vault/
+
+# Tooling
+.ruff_cache/
+.mypy_cache/
+.DS_Store
+
+# Data — must NEVER end up in this public repo.
+# Real Facebook data lives in the Obsidian vault, not here.
+data/
+raw/
+out/
+*.jsonl
+*.npy
+your_posts*.json
+posts_*.json
+facebook-*.zip
+
+# Allow fixtures (fake data, safe to commit)
+!tests/fixtures/*.json
