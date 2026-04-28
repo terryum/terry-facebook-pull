@@ -62,10 +62,17 @@ def cluster() -> None:
 
 
 @app.command()
-def synthesize(no_llm: bool = typer.Option(False, "--no-llm")) -> None:
+def synthesize(
+    no_llm: bool = typer.Option(False, "--no-llm"),
+    include_sensitive: bool = typer.Option(
+        False,
+        "--include-sensitive",
+        help="Synthesize SENSITIVE-flagged categories too. STRICT stays excluded.",
+    ),
+) -> None:
     """Stage 6: Sonnet synthesize → 06_synthesized.jsonl"""
     _bootstrap(no_llm)
-    synth_mod.run(no_llm=no_llm)
+    synth_mod.run(no_llm=no_llm, include_sensitive=include_sensitive)
 
 
 @app.command()
@@ -77,7 +84,12 @@ def export() -> None:
 
 @app.command(name="all")
 def run_all(
-    no_llm: bool = typer.Option(False, "--no-llm", help="Use deterministic stubs (offline/CI)")
+    no_llm: bool = typer.Option(False, "--no-llm", help="Use deterministic stubs (offline/CI)"),
+    include_sensitive: bool = typer.Option(
+        False,
+        "--include-sensitive",
+        help="Synthesize SENSITIVE categories too (e.g., 사회비평). STRICT (정치) stays excluded.",
+    ),
 ) -> None:
     """Run all 7 stages in sequence."""
     _bootstrap(no_llm)
@@ -86,7 +98,7 @@ def run_all(
     classify_mod.run(no_llm=no_llm)
     embed_mod.run(no_llm=no_llm)
     cluster_mod.run()
-    synth_mod.run(no_llm=no_llm)
+    synth_mod.run(no_llm=no_llm, include_sensitive=include_sensitive)
     export_mod.run()
 
 

@@ -50,11 +50,35 @@ def _extract_json(text: str) -> str:
     return text
 
 
-def call_json(model: str, system: str, user: str, max_tokens: int = 1024) -> dict[str, Any]:
+def call_json(
+    model: str,
+    system: str,
+    user: str,
+    max_tokens: int = 1024,
+    cache_system: bool = False,
+) -> dict[str, Any]:
+    """Call Anthropic, expect JSON response.
+
+    cache_system: when True, mark the system prompt for ephemeral prompt
+    caching. Useful when calling many times in a row with the same long
+    system prompt (classify a few thousand posts) — first call pays full
+    price, subsequent within the cache TTL pay 10% on the system tokens.
+    """
+    if cache_system:
+        system_arg = [
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+    else:
+        system_arg = system
+
     msg = client().messages.create(
         model=model,
         max_tokens=max_tokens,
-        system=system,
+        system=system_arg,
         messages=[{"role": "user", "content": user}],
     )
     text = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", None) == "text")
