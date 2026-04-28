@@ -6,6 +6,16 @@ from .paths import intermediate_dir
 
 _URL_ONLY = re.compile(r"^\s*(https?://\S+\s*)+$")
 
+# Facebook system messages start with the user's name (1-5 title-case
+# English words) followed by an action verb. Examples:
+#   "Terry Taewoong Um shared a post."
+#   "Terry Taewoong Um Shared from Instagram"
+#   "Jane Doe added 3 new photos."
+_SYSTEM_PREFIX = re.compile(
+    r"^[A-Z][\w'-]+(?:\s+[A-Z][\w'-]+){0,4}\s+"
+    r"(shared|Shared|posted|liked|commented|added|wrote|changed|tagged|updated)\b"
+)
+
 
 def reason_for(rec: dict) -> str | None:
     text = (rec.get("text") or "").strip()
@@ -13,7 +23,9 @@ def reason_for(rec: dict) -> str | None:
         return "empty"
     if _URL_ONLY.match(text):
         return "link_only"
-    if len(text) < 60:
+    if _SYSTEM_PREFIX.match(text):
+        return "system"
+    if len(text) < 10:
         return "too_short"
     return None
 
