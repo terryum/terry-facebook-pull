@@ -1,4 +1,5 @@
 import os
+import tempfile
 from pathlib import Path
 
 import typer
@@ -16,11 +17,38 @@ from .paths import ensure_dirs
 app = typer.Typer(help="Facebook DYI export → Obsidian pipeline")
 
 
+def _patch_ssl_certs() -> None:
+    """Some corporate setups set SSL_CERT_FILE to a single-cert root that
+    a SSL-inspection proxy uses. That root alone can't verify public API
+    domains (api.anthropic.com, api.openai.com), so we produce a combined
+    bundle (certifi public CAs + that corporate cert) and point
+    SSL_CERT_FILE / REQUESTS_CA_BUNDLE at it for this process only.
+    No-op when SSL_CERT_FILE already points at a real bundle (>50 KB).
+    """
+    cert_file = os.environ.get("SSL_CERT_FILE")
+    if not cert_file:
+        return
+    p = Path(cert_file)
+    if not p.exists() or p.stat().st_size > 50_000:
+        return
+
+    import certifi
+
+    combined = Path(tempfile.gettempdir()) / "fbpull-cabundle.pem"
+    if not combined.exists() or combined.stat().st_mtime < p.stat().st_mtime:
+        public = Path(certifi.where()).read_text()
+        corporate = p.read_text()
+        combined.write_text(public + "\n" + corporate)
+    os.environ["SSL_CERT_FILE"] = str(combined)
+    os.environ["REQUESTS_CA_BUNDLE"] = str(combined)
+
+
 def _bootstrap(no_llm: bool = False) -> None:
     load_dotenv()
     profile_env = os.environ.get("CLAUDE_PROFILE_ENV")
     if profile_env and Path(profile_env).expanduser().exists():
         load_dotenv(Path(profile_env).expanduser(), override=False)
+    _patch_ssl_certs()
     if no_llm:
         os.environ["FBPULL_NO_LLM"] = "1"
     ensure_dirs()

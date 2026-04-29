@@ -56,8 +56,14 @@ def call_json(
     user: str,
     max_tokens: int = 1024,
     cache_system: bool = False,
+    schema: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Call Anthropic, expect JSON response.
+    """Call Anthropic, return a dict.
+
+    If `schema` is provided, uses Anthropic's tool-use to force a
+    structured response that matches the schema (no JSON parsing
+    errors possible). Otherwise falls back to parsing JSON from the
+    text response, which is fragile with smaller models.
 
     cache_system: when True, mark the system prompt for ephemeral prompt
     caching. Useful when calling many times in a row with the same long
@@ -74,6 +80,25 @@ def call_json(
         ]
     else:
         system_arg = system
+
+    if schema is not None:
+        tool = {
+            "name": "submit",
+            "description": "Submit the structured result.",
+            "input_schema": schema,
+        }
+        msg = client().messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=system_arg,
+            tools=[tool],
+            tool_choice={"type": "tool", "name": "submit"},
+            messages=[{"role": "user", "content": user}],
+        )
+        for block in msg.content:
+            if getattr(block, "type", None) == "tool_use":
+                return dict(block.input)
+        raise RuntimeError("Model returned no tool_use block")
 
     msg = client().messages.create(
         model=model,

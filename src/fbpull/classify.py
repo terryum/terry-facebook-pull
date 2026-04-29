@@ -7,46 +7,30 @@ from . import taxonomy as taxonomy_mod
 from .paths import intermediate_dir
 
 
-_BASE_SYSTEM = """당신은 한 사용자의 페이스북 글들을 분석합니다.
+_BASE_SYSTEM = """당신은 한 사용자의 페이스북 글들을 분석합니다. 각 글에 대해 submit 도구를 호출해 구조화된 결과를 반환하세요.
 
 # 사용자 정보
 {bio}
 
-# 카테고리 (반드시 아래 중 정확히 하나의 이름으로 답)
+# 카테고리 (반드시 아래 중 정확히 한 이름)
 {categories}
 
-# 출력 형식
-각 글에 대해 다음 JSON 만 출력하세요. 다른 텍스트나 마크다운 펜스 없이.
-
-{{
-  "type": "thought | lesson | event | quote | announcement",
-  "primary_topic": "한국어 단어 1-3개 (카테고리보다 구체적인 주제)",
-  "category": "<위 카테고리 중 정확히 한 이름>",
-  "keep_for_synthesis": true | false
-}}
-
 기준:
-- thought: 자신의 사고/철학/의견 → keep_for_synthesis=true
-- lesson: 경험에서 얻은 깨달음 → true
-- event: 단순 사건/일상 보고 → false
-- quote: 인용 → false
-- announcement: 공지/홍보 → false
+- type=thought: 자신의 사고/철학/의견 → keep_for_synthesis=true
+- type=lesson: 경험에서 얻은 깨달음 → true
+- type=event: 단순 사건/일상 보고 → false
+- type=quote: 인용 → false
+- type=announcement: 공지/홍보 → false
 - 의미 없는 단편 → false"""
 
-_LEGACY_SYSTEM = """당신은 한 사람의 페이스북 글을 분석합니다. 각 글에 대해 다음 JSON 만 출력하세요. 다른 텍스트나 마크다운 펜스 없이.
-
-{
-  "type": "thought | lesson | event | quote | announcement",
-  "primary_topic": "한국어 단어 1-3개 (예: '학습', '리더십', '연구 방법론', '인간관계')",
-  "keep_for_synthesis": true | false
-}
+_LEGACY_SYSTEM = """당신은 한 사람의 페이스북 글을 분석합니다. submit 도구를 호출해 구조화된 결과를 반환하세요.
 
 기준:
-- thought: 자신의 사고/철학/의견 → keep_for_synthesis=true
-- lesson: 경험에서 얻은 깨달음 → true
-- event: 단순 사건/일상 보고 → false
-- quote: 인용 → false
-- announcement: 공지/홍보 → false
+- type=thought: 자신의 사고/철학/의견 → keep_for_synthesis=true
+- type=lesson: 경험에서 얻은 깨달음 → true
+- type=event: 단순 사건/일상 보고 → false
+- type=quote: 인용 → false
+- type=announcement: 공지/홍보 → false
 - 의미 없는 단편 → false"""
 
 _VALID_TYPES = {"thought", "lesson", "event", "quote", "announcement"}
@@ -66,6 +50,36 @@ def _build_system_prompt(tax: taxonomy_mod.Taxonomy | None) -> str:
     if tax is None:
         return _LEGACY_SYSTEM
     return _BASE_SYSTEM.format(bio=tax.bio.strip(), categories=tax.category_names_for_prompt())
+
+
+def _classify_schema(tax: taxonomy_mod.Taxonomy | None) -> dict:
+    base: dict = {
+        "type": "object",
+        "properties": {
+            "type": {
+                "type": "string",
+                "enum": list(_VALID_TYPES),
+                "description": "분류 타입",
+            },
+            "primary_topic": {
+                "type": "string",
+                "description": "한국어 단어 1-3개",
+            },
+            "keep_for_synthesis": {
+                "type": "boolean",
+                "description": "합성 후보 여부",
+            },
+        },
+        "required": ["type", "primary_topic", "keep_for_synthesis"],
+    }
+    if tax is not None:
+        base["properties"]["category"] = {
+            "type": "string",
+            "enum": [c.name for c in tax.categories],
+            "description": "카테고리 (위 enum 중 하나)",
+        }
+        base["required"].append("category")
+    return base
 
 
 def _validate(result: dict, tax: taxonomy_mod.Taxonomy | None) -> dict:
@@ -98,7 +112,10 @@ def classify_one(
         return cached
 
     system = _build_system_prompt(tax)
-    result = llm.call_json(model, system, text, max_tokens=200, cache_system=True)
+    schema = _classify_schema(tax)
+    result = llm.call_json(
+        model, system, text, max_tokens=400, cache_system=True, schema=schema
+    )
     result = _validate(result, tax)
 
     llm.cache_put(cache_dir, key, result)

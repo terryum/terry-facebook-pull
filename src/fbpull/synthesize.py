@@ -14,13 +14,24 @@ _SYSTEM_TEMPLATE = """당신은 사용자의 과거 페이스북 글들을 받�
 # 사용자 정보
 {bio}
 
-# 출력 형식 (JSON 만, 코드 펜스 없이)
-{{
-  "title": "한국어 제목 10-30자",
-  "slug": "english-kebab-case-slug",
-  "body": "300-600자 마크다운 본문. 사용자 1인칭 ('나는', '내가'). 여러 글의 공통점을 추상화하되 구체성을 잃지 마세요. 시기·맥락이 다양하면 그 변화를 인지하세요.",
-  "primary_tag": "한국어 또는 영어 단어 1개"
-}}"""
+submit 도구를 호출해 구조화된 결과를 반환하세요. body 필드는 300–600자, 사용자 1인칭 ("나는", "내가"), 여러 글의 공통점을 추상화하되 구체성을 잃지 마세요. 시기·맥락이 다양하면 그 변화를 인지하세요."""
+
+_SYNTH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string", "description": "한국어 제목 10-30자"},
+        "slug": {
+            "type": "string",
+            "description": "english kebab-case slug (lowercase letters, numbers, hyphens)",
+        },
+        "body": {"type": "string", "description": "300-600자 마크다운 본문"},
+        "primary_tag": {
+            "type": "string",
+            "description": "한국어 또는 영어 단어 1개",
+        },
+    },
+    "required": ["title", "slug", "body", "primary_tag"],
+}
 
 
 def _stub(cluster_id: str, members: list[dict]) -> dict:
@@ -68,7 +79,9 @@ def synth_one(
     for m in members:
         user += f"## [{m['date']}]\n{m['text']}\n\n"
 
-    result = llm.call_json(model, system, user, max_tokens=2000, cache_system=True)
+    result = llm.call_json(
+        model, system, user, max_tokens=2000, cache_system=True, schema=_SYNTH_SCHEMA
+    )
     if not result.get("title"):
         result["title"] = f"클러스터 {cluster_id}"
     if not result.get("slug"):
