@@ -529,10 +529,9 @@ def run() -> Path:
     md.append("\n")
 
     md.append("## 4. 모든 leaf — 카테고리별 전체 목록\n")
-    md.append("각 leaf 의 TF-IDF 주제어 (다른 leaf 와 비교해 distinctive 한 단어) + "
-              "첫 글 snippet. leftover 는 응집 못 이룬 보존 버킷.\n")
-    md.append(_build_all_leaves_section(stats, clusters, posts, keywords_by_leaf))
-    md.append("\n")
+    md.append(f"**→ [`all_leaves.md`](all_leaves.md)** 별도 파일 참조. "
+              f"각 leaf 의 TF-IDF 주제어 (다른 leaf 와 비교해 distinctive 한 단어) + "
+              f"첫 글 snippet + n/%/cohesion/depth. 총 {g['total_leaves']} leaves.\n")
 
     md.append("## 5. 시간 추이 — 카테고리\n")
     md.append(f"![]({Path('img') / img5})\n")
@@ -559,6 +558,22 @@ def run() -> Path:
 
     out_path = out_dir / "README.md"
     out_path.write_text("\n".join(md), encoding="utf-8")
+
+    # Separate file: all-leaves listing (heavy, stays out of README)
+    leaves_md = []
+    leaves_md.append(f"# 모든 leaf — 카테고리별 전체 목록 ({today})\n")
+    leaves_md.append(f"`fbpull cluster` 산출물 기준 {g['total_leaves']} leaves. "
+                     "각 항목은 leaf 식별자 (path-encoded id), 글 수, 카테고리 내 비율, "
+                     "cosine 응집도, 트리 depth, TF-IDF 주제어, 첫 글 snippet 순.\n")
+    leaves_md.append("- TF-IDF: 다른 leaf 와 비교해 distinctive 한 단어 5개 (max_df=0.6, min_df=2). "
+                     "Sonnet synthesize 전에 leaf 가 어떤 주제인지 가늠하는 용도.")
+    leaves_md.append("- LEFTOVER: 응집 못 이룬 stragglers — 별도 합산되어 보존된 버킷.")
+    leaves_md.append("- ↩ [README.md](README.md)\n")
+    leaves_md.append(_build_all_leaves_section(stats, clusters, posts, keywords_by_leaf))
+    leaves_path = out_dir / "all_leaves.md"
+    leaves_path.write_text("\n".join(leaves_md), encoding="utf-8")
+
     print(f"[report] {out_path}")
+    print(f"        {leaves_path}")
     print(f"  charts: {img_dir} ({len(list(img_dir.glob('*.png')))} files)")
     return out_path
