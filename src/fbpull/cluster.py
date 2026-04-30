@@ -282,26 +282,51 @@ def run(top_n: int = 5, neighbor_threshold: float = 0.55) -> dict:
     merges = _load_leaf_merges()
     if merges:
         applied = 0
+        orphaned_parents: set[str] = set()
         for src, dst in merges:
             if src not in clusters or dst not in clusters or src == dst:
                 continue
-            # Move members
             clusters[dst].extend(clusters[src])
             del clusters[src]
-            # Update hierarchy: detach src node, recompute dst
             if src in nodes:
                 src_parent = src.rsplit("/", 1)[0] if "/" in src else None
                 if src_parent and src_parent in nodes:
                     nodes[src_parent]["children"] = [
                         c for c in nodes[src_parent]["children"] if c != src
                     ]
+                    orphaned_parents.add(src_parent)
                 del nodes[src]
             if dst in nodes:
-                # Recompute size + cohesion for the destination leaf
                 rows_dst = arr[[pid_to_row[p] for p in clusters[dst]]]
                 nodes[dst]["size"] = len(clusters[dst])
                 nodes[dst]["mean_cohesion"] = _mean_cohesion(rows_dst)
             applied += 1
+
+        # Cascading cleanup: any inner node whose children list is now empty
+        # gets removed (and its own parent loses it as a child, possibly cascading).
+        changed = True
+        while changed:
+            changed = False
+            for nid in list(orphaned_parents):
+                if nid not in nodes:
+                    orphaned_parents.discard(nid)
+                    continue
+                if nodes[nid].get("is_leaf"):
+                    orphaned_parents.discard(nid)
+                    continue
+                if not nodes[nid].get("children"):
+                    parent = nid.rsplit("/", 1)[0] if "/" in nid else None
+                    if parent and parent in nodes:
+                        nodes[parent]["children"] = [
+                            c for c in nodes[parent]["children"] if c != nid
+                        ]
+                        orphaned_parents.add(parent)
+                    del nodes[nid]
+                    orphaned_parents.discard(nid)
+                    changed = True
+                else:
+                    orphaned_parents.discard(nid)
+
         if applied:
             print(f"[cluster] applied {applied} leaf merge(s) from _classify_overrides.json")
 
