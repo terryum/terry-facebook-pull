@@ -11,6 +11,7 @@ from . import embed as embed_mod
 from . import export as export_mod
 from . import filter as filter_mod
 from . import parse as parse_mod
+from . import report as report_mod
 from . import synthesize as synth_mod
 from .paths import ensure_dirs
 
@@ -108,6 +109,13 @@ def export() -> None:
     """Stage 7: write Archive/Synthesized markdown to vault"""
     _bootstrap()
     export_mod.run()
+
+
+@app.command()
+def report() -> None:
+    """Generate cluster analysis report (charts + markdown) under vault `_reports/<date>/`."""
+    _bootstrap()
+    report_mod.run()
 
 
 @app.command(name="all")
