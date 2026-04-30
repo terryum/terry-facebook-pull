@@ -12,14 +12,31 @@ from . import taxonomy as taxonomy_mod
 from .paths import fb_root, intermediate_dir
 
 
-def _load_category_overrides() -> dict[str, str]:
-    """Optional `<vault>/Private/Facebook/_classify_overrides.json` for manual
-    post → category re-routing (applied before per-category grouping)."""
+def _load_overrides_file() -> dict:
     p = fb_root() / "_classify_overrides.json"
     if not p.exists():
         return {}
-    data = json.loads(p.read_text(encoding="utf-8"))
+    return json.loads(p.read_text(encoding="utf-8")) or {}
+
+
+def _load_category_overrides() -> dict[str, str]:
+    """`overrides`: post_id → new_category (applied before per-category grouping)."""
+    data = _load_overrides_file()
     return data.get("overrides", {}) if isinstance(data, dict) else {}
+
+
+def _load_leaf_merges() -> list[tuple[str, str]]:
+    """`leaf_merges`: list of [src_leaf_id, dst_leaf_id] applied after F3' produces leaves.
+    Source leaf's posts move into destination, source is deleted from output."""
+    data = _load_overrides_file()
+    raw = data.get("leaf_merges", []) if isinstance(data, dict) else []
+    out: list[tuple[str, str]] = []
+    for entry in raw:
+        if isinstance(entry, list) and len(entry) >= 2:
+            out.append((str(entry[0]), str(entry[1])))
+        elif isinstance(entry, dict) and "from" in entry and "to" in entry:
+            out.append((str(entry["from"]), str(entry["to"])))
+    return out
 
 
 def _mean_cohesion(rows: np.ndarray) -> float:
@@ -260,6 +277,33 @@ def run(top_n: int = 5, neighbor_threshold: float = 0.55) -> dict:
         nodes[slug]["category_name"] = cat
         for leaf_id, local_indices in leaves:
             clusters[leaf_id] = sorted(pids[i] for i in local_indices)
+
+    # Apply leaf merges (post-F3' manual fixes from _classify_overrides.json)
+    merges = _load_leaf_merges()
+    if merges:
+        applied = 0
+        for src, dst in merges:
+            if src not in clusters or dst not in clusters or src == dst:
+                continue
+            # Move members
+            clusters[dst].extend(clusters[src])
+            del clusters[src]
+            # Update hierarchy: detach src node, recompute dst
+            if src in nodes:
+                src_parent = src.rsplit("/", 1)[0] if "/" in src else None
+                if src_parent and src_parent in nodes:
+                    nodes[src_parent]["children"] = [
+                        c for c in nodes[src_parent]["children"] if c != src
+                    ]
+                del nodes[src]
+            if dst in nodes:
+                # Recompute size + cohesion for the destination leaf
+                rows_dst = arr[[pid_to_row[p] for p in clusters[dst]]]
+                nodes[dst]["size"] = len(clusters[dst])
+                nodes[dst]["mean_cohesion"] = _mean_cohesion(rows_dst)
+            applied += 1
+        if applied:
+            print(f"[cluster] applied {applied} leaf merge(s) from _classify_overrides.json")
 
     # Sort clusters dict
     for k in clusters:
