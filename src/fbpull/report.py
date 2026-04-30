@@ -229,6 +229,47 @@ def _chart_time_series_categories(ts: dict, img_dir: Path) -> str:
     return name
 
 
+def _chart_time_series_categories_pct(ts: dict, img_dir: Path) -> str:
+    """100% stacked bar — per-year category share (proportion view)."""
+    by_cat = ts["by_category"]
+    all_years_set: set[str] = set()
+    for cat, yrs in by_cat.items():
+        all_years_set.update(yrs.keys())
+    years = sorted(int(y) for y in all_years_set)
+    cats_sorted = sorted(by_cat.keys(), key=lambda c: -sum(by_cat[c].values()))
+
+    matrix = np.zeros((len(cats_sorted), len(years)), dtype=float)
+    for i, cat in enumerate(cats_sorted):
+        for j, y in enumerate(years):
+            matrix[i, j] = by_cat[cat].get(str(y), 0)
+
+    totals = matrix.sum(axis=0)
+    totals_safe = np.where(totals == 0, 1, totals)
+    pct = 100 * matrix / totals_safe  # cats × years, each year col sums to 100
+
+    fig, ax = plt.subplots(figsize=(11, 5.5))
+    cmap = plt.get_cmap("tab20")
+    bottoms = np.zeros(len(years))
+    for i, cat in enumerate(cats_sorted):
+        ax.bar(
+            years, pct[i], bottom=bottoms, width=0.85,
+            color=cmap(i / max(1, len(cats_sorted) - 1)), label=cat,
+            edgecolor="white", linewidth=0.3,
+        )
+        bottoms += pct[i]
+    # Yearly post-count annotation above each bar
+    for j, y in enumerate(years):
+        ax.text(y, 102, f"{int(totals[j])}", ha="center", va="bottom", fontsize=7, color="#666")
+    ax.set_ylim(0, 110)
+    ax.set_xlabel("년도 (각 막대 위 = 그 해 총 글 수)")
+    ax.set_ylabel("카테고리 비율 (%)")
+    ax.set_title("연도별 카테고리 분포 비율 (each year normalized to 100%)")
+    ax.legend(loc="upper left", bbox_to_anchor=(1.0, 1.0), fontsize=8)
+    name = "06b_timeseries_category_pct.png"
+    _save(fig, img_dir / name)
+    return name
+
+
 def _chart_time_series_categories_lines(ts: dict, img_dir: Path) -> str:
     """Line chart: each category's trajectory."""
     by_cat = ts["by_category"]
@@ -431,6 +472,7 @@ def run() -> Path:
     img3 = _chart_depth_distribution(stats, img_dir)
     img4 = _chart_cohesion_histogram(stats, img_dir)
     img5 = _chart_time_series_categories(ts, img_dir)
+    img5b = _chart_time_series_categories_pct(ts, img_dir)
     img6 = _chart_time_series_categories_lines(ts, img_dir)
     img7 = _chart_top_leaves_heatmap(ts, stats, img_dir)
     img8 = _chart_per_category_summary(stats, img_dir)
@@ -495,6 +537,10 @@ def run() -> Path:
     md.append("## 5. 시간 추이 — 카테고리\n")
     md.append(f"![]({Path('img') / img5})\n")
     md.append("→ 연도별 카테고리 분포 (stacked area). 페이스북 활발기·잠잠기 + 어떤 시기에 어떤 주제가 우세했는지.\n")
+    md.append(f"![]({Path('img') / img5b})\n")
+    md.append("→ 같은 연도 데이터를 100% 비율로 정규화. 각 막대 위 숫자는 그 해의 총 글 수. "
+              "절대 글 수와 무관하게 \"그 해엔 어떤 주제가 비중을 차지했는지\" 가 보임. "
+              "예: 2018 의 압도적 정점 후 2020+ 에선 창업·경영 비중이 커지는 등 era 전환 패턴.\n")
     md.append(f"![]({Path('img') / img6})\n")
     md.append("→ 같은 데이터 line chart. 각 카테고리가 언제 정점·하강하는지.\n")
 
