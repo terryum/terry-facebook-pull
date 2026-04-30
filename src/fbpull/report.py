@@ -5,6 +5,7 @@ after any cluster reconfiguration.
 """
 
 import json
+import re
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -15,8 +16,46 @@ matplotlib.use("Agg")  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import matplotlib.font_manager as fm  # noqa: E402
 import numpy as np  # noqa: E402
+from sklearn.feature_extraction.text import TfidfVectorizer  # noqa: E402
 
 from .paths import fb_root, intermediate_dir
+
+
+_URL_RE = re.compile(r"https?://\S+")
+_FILE_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9_-]*\.(jpg|jpeg|png|gif|mp4|JPG|PNG)\b")
+_HASH_RE = re.compile(r"#\S+")
+
+
+def _clean_text(t: str) -> str:
+    t = _URL_RE.sub(" ", t)
+    t = _FILE_RE.sub(" ", t)
+    return t
+
+
+def _leaf_keywords_tfidf(by_leaf_texts: dict[str, list[str]], n_top: int = 5) -> dict[str, list[str]]:
+    """Per-leaf TF-IDF top keywords (2+ char Korean tokens, distinctive across leaves)."""
+    leaf_ids = list(by_leaf_texts.keys())
+    docs = [_clean_text(" ".join(texts)) for texts in by_leaf_texts.values()]
+    if not docs:
+        return {}
+    try:
+        vec = TfidfVectorizer(
+            token_pattern=r"[가-힣]{2,}",
+            max_features=20000,
+            max_df=0.6,
+            min_df=2,
+            sublinear_tf=True,
+        )
+        matrix = vec.fit_transform(docs)
+        features = vec.get_feature_names_out()
+    except ValueError:
+        return {lid: [] for lid in leaf_ids}
+    out: dict[str, list[str]] = {}
+    for i, lid in enumerate(leaf_ids):
+        scores = matrix[i].toarray().ravel()
+        top_idx = scores.argsort()[::-1][:n_top]
+        out[lid] = [features[j] for j in top_idx if scores[j] > 0]
+    return out
 
 
 def _setup_korean_font() -> None:
@@ -48,16 +87,19 @@ def _chart_posts_per_category(stats: dict, img_dir: Path) -> str:
     posts = [v["posts"] for _, v in items]
     leaves = [v["leaves"] for _, v in items]
     strict = [v["is_strict"] for _, v in items]
+    total_posts = sum(posts)
 
     fig, ax = plt.subplots(figsize=(10, 5.5))
     colors = ["#999" if s else "#3b82f6" for s in strict]
     bars = ax.barh(names, posts, color=colors)
     for bar, n_leaves, n_posts in zip(bars, leaves, posts):
+        pct = 100 * n_posts / total_posts
         ax.text(n_posts + 10, bar.get_y() + bar.get_height() / 2,
-                f"{n_leaves} leaves", va="center", fontsize=9, color="#444")
+                f"{n_posts} posts · {n_leaves} leaves · {pct:.1f}%",
+                va="center", fontsize=8.5, color="#444")
     ax.invert_yaxis()
     ax.set_xlabel("keep_for_synthesis posts")
-    ax.set_title("카테고리별 글 수 + leaf 수 (회색 = strict, unclustered)")
+    ax.set_title(f"카테고리별 글 수·leaf 수 (총 {total_posts:,} posts, 회색 = strict)")
     name = "01_posts_per_category.png"
     _save(fig, img_dir / name)
     return name
@@ -68,6 +110,7 @@ def _chart_leaf_size_histogram(stats: dict, img_dir: Path) -> str:
     sizes = [l["size"] for l in leaves]
     leftover_sizes = [l["size"] for l in leaves if l["is_leftover"]]
     bins = list(range(0, 45, 2))
+    total_posts = sum(sizes)
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.hist(sizes, bins=bins, color="#3b82f6", alpha=0.85, label="all leaves")
@@ -77,7 +120,10 @@ def _chart_leaf_size_histogram(stats: dict, img_dir: Path) -> str:
     ax.axvline(params["leaf_min"], color="gray", linestyle=":", linewidth=1, label=f"LEAF_MIN={params['leaf_min']}")
     ax.set_xlabel("leaf size (post 수)")
     ax.set_ylabel("leaf 개수")
-    ax.set_title(f"Leaf 크기 분포 ({len(leaves)} leaves, mean={np.mean(sizes):.0f}, median={np.median(sizes):.0f})")
+    ax.set_title(
+        f"Leaf 크기 분포 — {len(leaves)} leaves cover {total_posts:,} posts "
+        f"(mean={np.mean(sizes):.0f}, median={np.median(sizes):.0f})"
+    )
     ax.legend()
     name = "02_leaf_size_histogram.png"
     _save(fig, img_dir / name)
@@ -91,7 +137,7 @@ def _chart_depth_distribution(stats: dict, img_dir: Path) -> str:
         leaves_by_cat_by_depth[leaf["category_slug"]][leaf["depth"]] += 1
 
     items = sorted(cats.items(), key=lambda x: -x[1]["posts"])
-    names = [v["name"] for _, v in items]
+    names = [f"{v['name']} ({v['posts']}p)" for _, v in items]
     slugs = [k for k, _ in items]
     max_depth = max(int(d) for d in stats["global"]["depth_distribution"].keys())
     depth_levels = list(range(max_depth + 1))
@@ -119,17 +165,38 @@ def _chart_depth_distribution(stats: dict, img_dir: Path) -> str:
 
 def _chart_cohesion_histogram(stats: dict, img_dir: Path) -> str:
     leaves = [l for l in stats["leaves"] if not l["is_strict"]]
-    cohs = [l["mean_cohesion"] for l in leaves]
-    leftover = [l["mean_cohesion"] for l in leaves if l["is_leftover"]]
-    fig, ax = plt.subplots(figsize=(8, 4.5))
+    cohs = np.array([l["mean_cohesion"] for l in leaves])
+    sizes = np.array([l["size"] for l in leaves])
     bins = np.linspace(0.1, 1.0, 19)
-    ax.hist(cohs, bins=bins, color="#3b82f6", alpha=0.85, label="all leaves")
-    ax.hist(leftover, bins=bins, color="#f59e0b", alpha=0.85, label="leftover")
-    ax.axvline(0.45, color="green", linestyle="--", linewidth=1, label="θ=0.45 (tight)")
-    ax.set_xlabel("mean within-leaf cosine")
-    ax.set_ylabel("leaf 개수")
-    ax.set_title(f"Leaf 응집도 분포 (mean={np.mean(cohs):.3f})")
-    ax.legend()
+    total_posts = sizes.sum()
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
+
+    # Top: leaf count by cohesion bin
+    ax1.hist(cohs, bins=bins, color="#3b82f6", alpha=0.85, label="all leaves")
+    leftover_cohs = [l["mean_cohesion"] for l in leaves if l["is_leftover"]]
+    ax1.hist(leftover_cohs, bins=bins, color="#f59e0b", alpha=0.85, label="leftover")
+    ax1.axvline(0.45, color="green", linestyle="--", linewidth=1, label="θ=0.45 (tight)")
+    ax1.set_ylabel("leaf 개수")
+    ax1.set_title(f"Leaf 응집도 분포 (총 {len(leaves)} leaves, {total_posts:,} posts; mean cohesion={cohs.mean():.3f})")
+    ax1.legend(fontsize=9)
+
+    # Bottom: post-weighted (sum of leaf sizes per cohesion bin) — "tight 한 leaves 가 글의 몇 %를 커버하나"
+    bin_edges = bins
+    bin_idx = np.digitize(cohs, bin_edges) - 1
+    bin_idx = np.clip(bin_idx, 0, len(bin_edges) - 2)
+    post_per_bin = np.zeros(len(bin_edges) - 1)
+    for i, b in enumerate(bin_idx):
+        post_per_bin[b] += sizes[i]
+    centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    width = bin_edges[1] - bin_edges[0]
+    ax2.bar(centers, post_per_bin, width=width * 0.95, color="#10b981", alpha=0.85)
+    ax2.axvline(0.45, color="green", linestyle="--", linewidth=1)
+    pct_tight = 100 * post_per_bin[centers >= 0.45].sum() / total_posts if total_posts else 0
+    ax2.set_xlabel("mean within-leaf cosine")
+    ax2.set_ylabel("총 post 수")
+    ax2.set_title(f"같은 bins, post 수 합산 — 응집도 ≥0.45 (tight) 영역이 전체 글의 {pct_tight:.1f}%")
+
     name = "04_cohesion_histogram.png"
     _save(fig, img_dir / name)
     return name
@@ -199,14 +266,22 @@ def _chart_top_leaves_heatmap(ts: dict, stats: dict, img_dir: Path) -> str:
         for j, y in enumerate(years):
             matrix[i, j] = by_leaf.get(leaf["id"], {}).get(str(y), 0)
 
+    cats = stats["categories"]
+    cat_posts_by_slug = {slug: c["posts"] for slug, c in cats.items()}
+
     fig, ax = plt.subplots(figsize=(11, 9))
     im = ax.imshow(matrix, aspect="auto", cmap="YlOrRd")
     ax.set_xticks(range(len(years)))
     ax.set_xticklabels(years, rotation=45, ha="right")
-    labels = [f"{l['id']} (n={l['size']}, c={l['mean_cohesion']:.2f})" for l in leaves_sorted]
+    labels = []
+    for l in leaves_sorted:
+        cat_slug = l["id"].split("/")[0]
+        cat_total = cat_posts_by_slug.get(cat_slug, 0)
+        pct_cat = 100 * l["size"] / cat_total if cat_total else 0
+        labels.append(f"{l['id']} (n={l['size']}, {pct_cat:.0f}% of cat, c={l['mean_cohesion']:.2f})")
     ax.set_yticks(range(len(leaves_sorted)))
     ax.set_yticklabels(labels, fontsize=7)
-    ax.set_title("Top-30 Leaves × Year (post count)")
+    ax.set_title(f"Top-30 Leaves × Year (post count) — 합계 {sum(l['size'] for l in leaves_sorted)} posts")
     fig.colorbar(im, ax=ax, label="posts")
     name = "07_top_leaves_heatmap.png"
     _save(fig, img_dir / name)
@@ -234,10 +309,17 @@ def _chart_per_category_summary(stats: dict, img_dir: Path) -> str:
     return name
 
 
-def _build_topic_preview(clusters: dict, stats: dict, posts: dict, top_n: int = 30) -> str:
-    """Top-N leaves by size, with first post as topic preview."""
-    leaves_sorted = sorted([l for l in stats["leaves"] if not l["is_strict"]],
-                          key=lambda x: -x["size"])[:top_n]
+def _build_topic_preview(
+    clusters: dict, stats: dict, posts: dict, keywords_by_leaf: dict[str, list[str]],
+    top_n: int = 30,
+) -> str:
+    """Top-N leaves by size, with TF-IDF keywords + first post snippet + % of category."""
+    cat_posts_by_slug = {slug: c["posts"] for slug, c in stats["categories"].items()}
+    cat_name_by_slug = {slug: c["name"] for slug, c in stats["categories"].items()}
+    leaves_sorted = sorted(
+        [l for l in stats["leaves"] if not l["is_strict"]],
+        key=lambda x: -x["size"],
+    )[:top_n]
     lines = []
     for leaf in leaves_sorted:
         lid = leaf["id"]
@@ -245,16 +327,25 @@ def _build_topic_preview(clusters: dict, stats: dict, posts: dict, top_n: int = 
         sample = posts.get(members[0], {})
         text = (sample.get("text") or "").replace("\n", " ").strip()[:100]
         date = sample.get("date", "")
-        cat = leaf["category_slug"]
-        cohesion = leaf["mean_cohesion"]
-        depth = leaf["depth"]
-        lines.append(f"- **`{lid}`** (n={leaf['size']}, cohesion={cohesion:.2f}, depth={depth})")
+        cat_slug = leaf["category_slug"]
+        cat_name = cat_name_by_slug.get(cat_slug, cat_slug)
+        cat_total = cat_posts_by_slug.get(cat_slug, 0)
+        pct_cat = 100 * leaf["size"] / cat_total if cat_total else 0
+        kws = keywords_by_leaf.get(lid, [])
+        kw_str = ", ".join(kws) if kws else "—"
+        lines.append(
+            f"- **`{lid}`** (n={leaf['size']} = {pct_cat:.1f}% of {cat_name}, "
+            f"cohesion={leaf['mean_cohesion']:.2f}, depth={leaf['depth']})"
+        )
+        lines.append(f"  - 주제어: **{kw_str}**")
         lines.append(f"  - [{date}] {text}…")
     return "\n".join(lines)
 
 
-def _build_per_category_section(stats: dict, clusters: dict, posts: dict) -> str:
-    """For each category, list top 5 leaves with first-post sample."""
+def _build_all_leaves_section(
+    stats: dict, clusters: dict, posts: dict, keywords_by_leaf: dict[str, list[str]],
+) -> str:
+    """ALL leaves per category — id, n, %, cohesion, keywords, first-post snippet."""
     out = []
     cats = stats["categories"]
     for slug, c in sorted(cats.items(), key=lambda x: -x[1]["posts"]):
@@ -262,26 +353,55 @@ def _build_per_category_section(stats: dict, clusters: dict, posts: dict) -> str
             out.append(f"\n### {c['name']} (strict, {c['posts']} posts, unclustered)\n")
             continue
         out.append(
-            f"\n### {c['name']} ({c['posts']} posts → {c['leaves']} leaves, "
-            f"depth {c['depth_min']}–{c['depth_max']}, mean leaf {c['leaf_size_mean']:.0f})\n"
+            f"\n### {c['name']} — {c['posts']} posts → {c['leaves']} leaves "
+            f"(depth {c['depth_min']}–{c['depth_max']}, mean leaf {c['leaf_size_mean']:.0f})\n"
         )
         leaves = sorted(
-            [l for l in stats["leaves"] if l["category_slug"] == slug and not l["is_leftover"]],
-            key=lambda x: -x["size"],
-        )[:5]
+            [l for l in stats["leaves"] if l["category_slug"] == slug],
+            key=lambda x: (-x["size"], x["id"]),
+        )
         for leaf in leaves:
             members = clusters.get(leaf["id"], [])
             if not members:
                 continue
             sample = posts.get(members[0], {})
-            text = (sample.get("text") or "").replace("\n", " ").strip()[:120]
+            text = (sample.get("text") or "").replace("\n", " ").strip()[:90]
             date = sample.get("date", "")
+            pct = 100 * leaf["size"] / c["posts"] if c["posts"] else 0
+            kws = keywords_by_leaf.get(leaf["id"], [])
+            kw_str = ", ".join(kws) if kws else "(no distinctive words)"
+            tag = " · LEFTOVER" if leaf["is_leftover"] else ""
             out.append(
-                f"- **`{leaf['id']}`** (n={leaf['size']}, cohesion={leaf['mean_cohesion']:.2f}, "
-                f"depth={leaf['depth']})  \n"
+                f"- **`{leaf['id']}`** · n={leaf['size']} ({pct:.1f}%) · "
+                f"cos={leaf['mean_cohesion']:.2f} · d={leaf['depth']}{tag}  \n"
+                f"  주제어: **{kw_str}**  \n"
                 f"  [{date}] {text}…"
             )
     return "\n".join(out)
+
+
+def _build_summary_table(stats: dict) -> str:
+    """Header summary table — per-category posts/leaves/leaf-stats."""
+    cats = stats["categories"]
+    items = sorted(cats.items(), key=lambda x: -x[1]["posts"])
+    total_posts = sum(c["posts"] for c in cats.values())
+    lines = [
+        "| 카테고리 | 글 수 | % | leaves | depth | mean leaf | leftover |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for slug, c in items:
+        pct = 100 * c["posts"] / total_posts
+        if c["is_strict"]:
+            lines.append(f"| {c['name']} *(strict)* | {c['posts']} | {pct:.1f}% | — | — | — | — |")
+        else:
+            lines.append(
+                f"| {c['name']} | {c['posts']} | {pct:.1f}% | "
+                f"{c['leaves']} | {c['depth_min']}–{c['depth_max']} | "
+                f"{c['leaf_size_mean']:.1f} | {c['leftover_leaves']} |"
+            )
+    lines.append(f"| **합계** | **{total_posts}** | 100% | "
+                 f"**{sum(c['leaves'] for c in cats.values())}** | | | |")
+    return "\n".join(lines)
 
 
 def run() -> Path:
@@ -315,6 +435,14 @@ def run() -> Path:
     img7 = _chart_top_leaves_heatmap(ts, stats, img_dir)
     img8 = _chart_per_category_summary(stats, img_dir)
 
+    # TF-IDF keywords per leaf (one pass over all leaves)
+    by_leaf_texts: dict[str, list[str]] = {}
+    for cid, members in clusters.items():
+        if cid.endswith("/-1"):
+            continue
+        by_leaf_texts[cid] = [posts[pid]["text"] for pid in members if pid in posts and posts[pid].get("text")]
+    keywords_by_leaf = _leaf_keywords_tfidf(by_leaf_texts, n_top=5)
+
     g = stats["global"]
     params = g["params"]
     md = []
@@ -328,6 +456,10 @@ def run() -> Path:
     md.append(f"- 깊이 분포: {g['depth_distribution']}")
     md.append(f"- 응집도 histogram: {g['leaf_cohesion_histogram']}")
     md.append(f"- 알고리즘 파라미터: `{params}`\n")
+
+    md.append("### 카테고리별 요약 표\n")
+    md.append(_build_summary_table(stats))
+    md.append("\n")
 
     md.append("## 1. 분포 개요\n")
     md.append(f"![]({Path('img') / img1})\n")
@@ -351,11 +483,13 @@ def run() -> Path:
               "leaf 도 많지만 카테고리별 응집 패턴에 따라 달라짐.\n")
 
     md.append("## 3. Top 30 Leaves (글 수 기준)\n")
-    md.append(_build_topic_preview(clusters, stats, posts, top_n=30))
+    md.append(_build_topic_preview(clusters, stats, posts, keywords_by_leaf, top_n=30))
     md.append("\n")
 
-    md.append("## 4. 카테고리별 상위 5 leaves (sample post)\n")
-    md.append(_build_per_category_section(stats, clusters, posts))
+    md.append("## 4. 모든 leaf — 카테고리별 전체 목록\n")
+    md.append("각 leaf 의 TF-IDF 주제어 (다른 leaf 와 비교해 distinctive 한 단어) + "
+              "첫 글 snippet. leftover 는 응집 못 이룬 보존 버킷.\n")
+    md.append(_build_all_leaves_section(stats, clusters, posts, keywords_by_leaf))
     md.append("\n")
 
     md.append("## 5. 시간 추이 — 카테고리\n")

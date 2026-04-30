@@ -197,7 +197,7 @@ def run(top_n: int = 5, neighbor_threshold: float = 0.55) -> dict:
     lift = float(os.environ.get("FBPULL_LIFT", "0.10"))
     floor = float(os.environ.get("FBPULL_FLOOR", "0.35"))
     min_grad = float(os.environ.get("FBPULL_MIN_GRAD", "0.20"))
-    max_depth = int(os.environ.get("FBPULL_MAX_DEPTH", "4"))
+    max_depth = int(os.environ.get("FBPULL_MAX_DEPTH", "3"))
 
     # Group posts by category
     by_cat: dict[str, list[str]] = {}
