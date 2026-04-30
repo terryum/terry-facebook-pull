@@ -1,5 +1,6 @@
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from . import llm
@@ -135,35 +136,76 @@ def run(no_llm: bool = False) -> dict[str, int]:
         print(f"[classify] taxonomy: {len(tax.categories)} categories, {len(tax.eras)} eras (hash {tax.hash})")
 
     model = os.environ.get("FBPULL_CLASSIFY_MODEL", "claude-haiku-4-5")
+    workers = max(1, int(os.environ.get("FBPULL_CLASSIFY_WORKERS", "6")))
+
+    records: list[dict] = []
+    with in_path.open(encoding="utf-8") as f:
+        for line in f:
+            rec = json.loads(line)
+            if rec.get("kept"):
+                records.append(rec)
+
+    def _classify(rec: dict) -> dict | None:
+        try:
+            cls = classify_one(model, rec["post_id"], rec["text"], tax, no_llm)
+        except Exception as e:
+            print(f"[classify] error for {rec.get('post_id')}: {type(e).__name__}: {e}", flush=True)
+            return None
+        out_rec = dict(rec)
+        out_rec.update(cls)
+        if tax is not None:
+            year = datetime.fromtimestamp(out_rec["timestamp"], tz=timezone.utc).year
+            out_rec["era"] = tax.era_for_year(year)
+        return out_rec
+
+    results: list[dict] = []
+    n_failed = 0
+    if no_llm or workers <= 1:
+        for i, rec in enumerate(records, 1):
+            r = _classify(rec)
+            if r is None:
+                n_failed += 1
+            else:
+                results.append(r)
+            if i % 200 == 0:
+                print(f"[classify] {i}/{len(records)}", flush=True)
+    else:
+        print(f"[classify] {len(records)} posts, {workers} workers", flush=True)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = {ex.submit(_classify, rec): rec for rec in records}
+            done = 0
+            for fut in as_completed(futures):
+                r = fut.result()
+                if r is None:
+                    n_failed += 1
+                else:
+                    results.append(r)
+                done += 1
+                if done % 200 == 0:
+                    print(f"[classify] {done}/{len(records)}", flush=True)
+
+    # Sort by post_id so output is deterministic regardless of completion order.
+    results.sort(key=lambda r: r["post_id"])
+
     type_counts: dict[str, int] = {}
     cat_counts: dict[str, int] = {}
     era_counts: dict[str, int] = {}
     keep_count = 0
-    total = 0
-
-    with in_path.open(encoding="utf-8") as f, out_path.open("w", encoding="utf-8") as out:
-        for line in f:
-            rec = json.loads(line)
-            if not rec.get("kept"):
-                continue
-            total += 1
-            cls = classify_one(model, rec["post_id"], rec["text"], tax, no_llm)
-            rec.update(cls)
-
-            # Era is deterministic — derived from timestamp, not LLM
-            if tax is not None:
-                year = datetime.fromtimestamp(rec["timestamp"], tz=timezone.utc).year
-                rec["era"] = tax.era_for_year(year)
-                era_counts[rec["era"]] = era_counts.get(rec["era"], 0) + 1
-
-            type_counts[cls["type"]] = type_counts.get(cls["type"], 0) + 1
-            if cls.get("keep_for_synthesis"):
+    with out_path.open("w", encoding="utf-8") as out:
+        for rec in results:
+            type_counts[rec["type"]] = type_counts.get(rec["type"], 0) + 1
+            if rec.get("keep_for_synthesis"):
                 keep_count += 1
-            if cls.get("category"):
-                cat_counts[cls["category"]] = cat_counts.get(cls["category"], 0) + 1
+            if rec.get("category"):
+                cat_counts[rec["category"]] = cat_counts.get(rec["category"], 0) + 1
+            if rec.get("era"):
+                era_counts[rec["era"]] = era_counts.get(rec["era"], 0) + 1
             out.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-    print(f"[classify] total={total} keep_for_synthesis={keep_count}")
+    summary = f"[classify] total={len(results)} keep_for_synthesis={keep_count}"
+    if n_failed:
+        summary += f" failed={n_failed}"
+    print(summary)
     if cat_counts:
         print("  Categories:")
         for c, n in sorted(cat_counts.items(), key=lambda x: -x[1]):
