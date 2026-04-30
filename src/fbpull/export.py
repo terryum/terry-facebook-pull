@@ -35,14 +35,10 @@ def _unique_name(base: str, used: set[str]) -> str:
 
 
 def _cluster_num(cid_str: str) -> int:
-    if "/" in cid_str:
-        _, _, num = cid_str.rpartition("/")
-    else:
-        num = cid_str
-    try:
-        return int(num)
-    except ValueError:
+    """-1 only for strict (`<slug>/-1`). Any path-encoded leaf or leftover counts as a real cluster."""
+    if cid_str.endswith("/-1"):
         return -1
+    return 0
 
 
 def _manifest_path():
@@ -298,7 +294,7 @@ def _write_coverage(
         n = _cluster_num(cid_str)
         if n < 0:
             continue
-        cat_slug, _, _ = cid_str.rpartition("/")
+        cat_slug = cid_str.split("/", 1)[0]
         # Find category name by slug
         cat_name = next(
             (c.name for c in tax.categories if c.slug == cat_slug),

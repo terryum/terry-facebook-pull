@@ -129,12 +129,12 @@ def run(no_llm: bool = False, include_sensitive: bool = False) -> int:
 
     with out_path.open("w", encoding="utf-8") as out:
         for cid_str, member_ids in clusters.items():
-            cat_slug, _, num = cid_str.rpartition("/")
-            try:
-                cluster_num = int(num)
-            except ValueError:
-                cluster_num = -1
-            if cluster_num < 0:
+            # Path-encoded keys: "<slug>" or "<slug>/0" or "<slug>/0/2/leftover" etc.
+            # Strict categories use "<slug>/-1" (skip — unclustered).
+            parts = cid_str.split("/")
+            cat_slug = parts[0]
+            leaf_path = "/".join(parts[1:]) if len(parts) > 1 else ""
+            if leaf_path == "-1":
                 n_skipped_noise += len(member_ids)
                 continue
 
