@@ -9,7 +9,17 @@ from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity
 
 from . import taxonomy as taxonomy_mod
-from .paths import intermediate_dir
+from .paths import fb_root, intermediate_dir
+
+
+def _load_category_overrides() -> dict[str, str]:
+    """Optional `<vault>/Private/Facebook/_classify_overrides.json` for manual
+    post → category re-routing (applied before per-category grouping)."""
+    p = fb_root() / "_classify_overrides.json"
+    if not p.exists():
+        return {}
+    data = json.loads(p.read_text(encoding="utf-8"))
+    return data.get("overrides", {}) if isinstance(data, dict) else {}
 
 
 def _mean_cohesion(rows: np.ndarray) -> float:
@@ -189,6 +199,18 @@ def run(top_n: int = 5, neighbor_threshold: float = 0.55) -> dict:
     tax = taxonomy_mod.load()
     strict_categories = {c.name for c in (tax.categories if tax else []) if c.strict}
     cat_slug = {c.name: c.slug for c in (tax.categories if tax else [])}
+
+    # Manual category overrides: post_id -> new_category (applied before grouping).
+    # Skip if classify already wrote into a category not in current taxonomy
+    # (e.g., taxonomy renamed) — override is the source of truth.
+    overrides = _load_category_overrides()
+    if overrides:
+        n_applied = 0
+        for pid, new_cat in overrides.items():
+            if pid in post_cat:
+                post_cat[pid] = new_cat
+                n_applied += 1
+        print(f"[cluster] applied {n_applied} category overrides from _classify_overrides.json")
 
     # F3' tunable parameters via env vars
     leaf_max = int(os.environ.get("FBPULL_LEAF_MAX", "40"))
