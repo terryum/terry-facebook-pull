@@ -25,6 +25,17 @@ def _load_category_overrides() -> dict[str, str]:
     return data.get("overrides", {}) if isinstance(data, dict) else {}
 
 
+def _load_category_renames() -> dict[str, str]:
+    """`category_renames`: old_category_name → new_category_name. Applied after
+    per-post overrides, so every post originally tagged with `old` (and not
+    individually overridden to something else) ends up under `new`."""
+    data = _load_overrides_file()
+    raw = data.get("category_renames", {}) if isinstance(data, dict) else {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): str(v) for k, v in raw.items()}
+
+
 def _load_leaf_merges() -> list[tuple[str, str]]:
     """`leaf_merges`: list of [src_leaf_id, dst_leaf_id] applied after F3' produces leaves.
     Source leaf's posts move into destination, source is deleted from output."""
@@ -39,6 +50,175 @@ def _load_leaf_merges() -> list[tuple[str, str]]:
     return out
 
 
+def _load_leaf_groups() -> dict[str, dict[str, list[str]]]:
+    """`leaf_groups`: {category_slug: {group_name: [post_id...]}}. Applied post-F3'
+    to insert a mid-node layer between a category root and its direct children.
+    Each direct child is assigned to whichever group its leaf members belong to
+    by majority. Definition is post_id-based (not slug-based) so it survives
+    re-clustering when leaf boundaries shift."""
+    data = _load_overrides_file()
+    raw = data.get("leaf_groups", {}) if isinstance(data, dict) else {}
+    out: dict[str, dict[str, list[str]]] = {}
+    if not isinstance(raw, dict):
+        return out
+    for cat, groups in raw.items():
+        if not isinstance(groups, dict):
+            continue
+        out[str(cat)] = {
+            str(gname): [str(p) for p in pids]
+            for gname, pids in groups.items()
+            if isinstance(pids, list)
+        }
+    return out
+
+
+def _leaf_descendants(slug: str, nodes: dict) -> list[str]:
+    """Return all leaf slugs under `slug` (inclusive if leaf)."""
+    n = nodes.get(slug)
+    if not n:
+        return []
+    if n.get("is_leaf"):
+        return [slug]
+    out: list[str] = []
+    for c in n.get("children", []):
+        out.extend(_leaf_descendants(c, nodes))
+    return out
+
+
+def _rename_subtree(
+    old_prefix: str, new_prefix: str, nodes: dict, clusters: dict
+) -> None:
+    """Move every node and leaf cluster whose key starts with `old_prefix`
+    to the same path under `new_prefix`. Keys that match exactly are also moved.
+    Updates each node's `children` list to reflect the new keys."""
+    # Find all node keys to move (exact + descendants)
+    node_keys = [k for k in list(nodes.keys()) if k == old_prefix or k.startswith(old_prefix + "/")]
+    cluster_keys = [k for k in list(clusters.keys()) if k == old_prefix or k.startswith(old_prefix + "/")]
+    for k in node_keys:
+        new_k = new_prefix + k[len(old_prefix):]
+        node = nodes.pop(k)
+        node["children"] = [
+            (new_prefix + c[len(old_prefix):]) if (c == old_prefix or c.startswith(old_prefix + "/")) else c
+            for c in node.get("children", [])
+        ]
+        nodes[new_k] = node
+    for k in cluster_keys:
+        new_k = new_prefix + k[len(old_prefix):]
+        clusters[new_k] = clusters.pop(k)
+
+
+def _bump_depth(slug: str, nodes: dict, delta: int) -> None:
+    """Add `delta` to depth of node `slug` and all descendants."""
+    n = nodes.get(slug)
+    if not n:
+        return
+    n["depth"] = n.get("depth", 0) + delta
+    for c in n.get("children", []):
+        _bump_depth(c, nodes, delta)
+
+
+def _apply_leaf_groups(
+    clusters: dict, nodes: dict, arr: np.ndarray, pid_to_row: dict[str, int]
+) -> int:
+    """Insert a mid-node layer under each configured category root by grouping
+    its direct children via majority post_id membership in `leaf_groups`."""
+    spec = _load_leaf_groups()
+    if not spec:
+        return 0
+    applied = 0
+    for cat_slug, groups in spec.items():
+        cat_node = nodes.get(cat_slug)
+        if not cat_node or cat_node.get("is_leaf"):
+            continue
+
+        # post_id -> group_name mapping
+        pid_to_group: dict[str, str] = {}
+        for gname, pids in groups.items():
+            for pid in pids:
+                pid_to_group[pid] = gname
+
+        # Bucket each direct child into a group by majority leaf membership
+        old_children = list(cat_node["children"])
+        bucketed: dict[str, list[str]] = {gname: [] for gname in groups}
+        unassigned: list[str] = []
+        for child in old_children:
+            members: list[str] = []
+            for leaf in _leaf_descendants(child, nodes):
+                members.extend(clusters.get(leaf, []))
+            counts: dict[str, int] = {}
+            for pid in members:
+                g = pid_to_group.get(pid)
+                if g:
+                    counts[g] = counts.get(g, 0) + 1
+            if counts:
+                top_group = max(counts, key=counts.get)
+                bucketed[top_group].append(child)
+            else:
+                unassigned.append(child)
+
+        # Build new children list for category root, in spec-declared group order
+        new_cat_children: list[str] = []
+        for gname in groups.keys():
+            children_in_group = bucketed.get(gname, [])
+            if not children_in_group:
+                continue
+            mid_slug = f"{cat_slug}/{gname}"
+            renamed: list[str] = []
+            for old_child in children_in_group:
+                new_child = mid_slug + old_child[len(cat_slug):]
+                _rename_subtree(old_child, new_child, nodes, clusters)
+                _bump_depth(new_child, nodes, 1)
+                renamed.append(new_child)
+
+            # Aggregate stats for the new mid-node
+            mid_members: list[str] = []
+            for ch in renamed:
+                for leaf in _leaf_descendants(ch, nodes):
+                    mid_members.extend(clusters.get(leaf, []))
+            mid_rows = arr[[pid_to_row[p] for p in mid_members if p in pid_to_row]]
+            nodes[mid_slug] = {
+                "size": len(mid_members),
+                "mean_cohesion": _mean_cohesion(mid_rows) if len(mid_rows) >= 2 else 0.0,
+                "depth": cat_node.get("depth", 0) + 1,
+                "is_leaf": False,
+                "children": renamed,
+                "is_leftover": False,
+            }
+            new_cat_children.append(mid_slug)
+            applied += len(renamed)
+
+        new_cat_children.extend(unassigned)
+        cat_node["children"] = new_cat_children
+
+        # Flatten degenerate single-child chains under each new mid-node:
+        # if `mid` has exactly one mid-node child, pull that grandchild's
+        # children up into `mid` and drop the redundant intermediate.
+        for gname in groups.keys():
+            mid_slug = f"{cat_slug}/{gname}"
+            while True:
+                mid = nodes.get(mid_slug)
+                if not mid or mid.get("is_leaf"):
+                    break
+                children = mid.get("children", [])
+                if len(children) != 1:
+                    break
+                only = children[0]
+                only_node = nodes.get(only)
+                if not only_node or only_node.get("is_leaf"):
+                    break
+                grandchildren = list(only_node.get("children", []))
+                renamed_gc: list[str] = []
+                for gc in grandchildren:
+                    new_gc = mid_slug + gc[len(only):]
+                    _rename_subtree(gc, new_gc, nodes, clusters)
+                    _bump_depth(new_gc, nodes, -1)
+                    renamed_gc.append(new_gc)
+                mid["children"] = renamed_gc
+                del nodes[only]
+
+    return applied
+
+
 def _mean_cohesion(rows: np.ndarray) -> float:
     """Mean pairwise cosine within a set of L2-normalized vectors. 1.0 if singleton."""
     n = len(rows)
@@ -47,6 +227,99 @@ def _mean_cohesion(rows: np.ndarray) -> float:
     sim = rows @ rows.T
     iu = np.triu_indices(n, k=1)
     return float(sim[iu].mean())
+
+
+def _subdivide_large_leftovers(
+    clusters: dict,
+    nodes: dict,
+    arr: np.ndarray,
+    pid_to_row: dict,
+    *,
+    min_size: int,
+    sub_leaf_min: int,
+    sub_floor: float,
+    sub_target: int,
+) -> int:
+    """Re-cluster large leftover leaves to extract buried sub-themes.
+
+    For each leftover leaf with size ≥ min_size, run KMeans with relaxed
+    parameters (smaller leaf_min, lower cohesion floor). Sub-clusters that
+    graduate become new sub-leaves; the rest stay in a smaller leftover.
+    """
+    subdivided = 0
+    for leaf_id in [k for k in clusters.keys() if k.endswith("/leftover")]:
+        node = nodes.get(leaf_id)
+        if not node or not node.get("is_leaf"):
+            continue
+        if node["size"] < min_size:
+            continue
+        pids = clusters[leaf_id]
+        n = len(pids)
+        rows_idx = [pid_to_row[p] for p in pids]
+        rows = arr[rows_idx]
+        k = max(2, min(n // sub_leaf_min, max(2, n // sub_target)))
+        if n < k + 2:
+            continue
+        labels = KMeans(n_clusters=k, random_state=0, n_init=3).fit_predict(rows)
+
+        kept: list[tuple[list[str], list[int], float]] = []
+        leftover_pids: list[str] = []
+        leftover_indices: list[int] = []
+        for ci in range(k):
+            sub_local = [j for j, lbl in enumerate(labels) if lbl == ci]
+            sp = [pids[j] for j in sub_local]
+            si = [rows_idx[j] for j in sub_local]
+            if len(sp) < sub_leaf_min:
+                leftover_pids.extend(sp)
+                leftover_indices.extend(si)
+                continue
+            cohesion = _mean_cohesion(arr[si])
+            if cohesion < sub_floor:
+                leftover_pids.extend(sp)
+                leftover_indices.extend(si)
+                continue
+            kept.append((sp, si, cohesion))
+
+        if not kept:
+            continue
+
+        parent_id = leaf_id.rsplit("/", 1)[0]
+        old_depth = node["depth"]
+        del clusters[leaf_id]
+        nodes[leaf_id] = {
+            "size": n,
+            "mean_cohesion": _mean_cohesion(rows),
+            "depth": old_depth,
+            "is_leaf": False,
+            "children": [],
+            "is_leftover": True,
+        }
+        for i, (sp, _si, cohesion) in enumerate(kept):
+            sub_id = f"{leaf_id}/{i}"
+            clusters[sub_id] = sorted(sp)
+            nodes[sub_id] = {
+                "size": len(sp),
+                "mean_cohesion": cohesion,
+                "depth": old_depth + 1,
+                "is_leaf": True,
+                "children": [],
+                "is_leftover": False,
+            }
+            nodes[leaf_id]["children"].append(sub_id)
+        if leftover_pids:
+            sub_id = f"{leaf_id}/leftover"
+            clusters[sub_id] = sorted(leftover_pids)
+            nodes[sub_id] = {
+                "size": len(leftover_pids),
+                "mean_cohesion": _mean_cohesion(arr[leftover_indices]),
+                "depth": old_depth + 1,
+                "is_leaf": True,
+                "children": [],
+                "is_leftover": True,
+            }
+            nodes[leaf_id]["children"].append(sub_id)
+        subdivided += 1
+    return subdivided
 
 
 def _split_recursive(
@@ -85,16 +358,10 @@ def _split_recursive(
         nodes[prefix]["is_leaf"] = True
         return [(prefix, indices)]
 
-    # Depth cap → force size-split into leaves at this level
+    # Depth cap → seal current node as leaf (allow oversize over leaf_max)
     if depth >= max_depth:
-        forced_k = max(2, math.ceil(n / target))
-        labels = KMeans(n_clusters=forced_k, random_state=0, n_init=3).fit_predict(rows)
-        return _split_with_labels(
-            rows, indices, labels, forced_k, depth, prefix, nodes,
-            leaf_max=leaf_max, leaf_min=leaf_min, target=target,
-            lift=lift, floor=floor, min_grad=min_grad, max_depth=max_depth,
-            forced_at_cap=True,
-        )
+        nodes[prefix]["is_leaf"] = True
+        return [(prefix, indices)]
 
     # Cohesion-driven k search
     target_θ = max(floor, parent_coh + lift)
@@ -125,14 +392,12 @@ def _split_recursive(
         rows, indices, best_labels, best_k, depth, prefix, nodes,
         leaf_max=leaf_max, leaf_min=leaf_min, target=target,
         lift=lift, floor=floor, min_grad=min_grad, max_depth=max_depth,
-        forced_at_cap=False,
     )
 
 
 def _split_with_labels(
     rows, indices, labels, k, depth, prefix, nodes, *,
     leaf_max, leaf_min, target, lift, floor, min_grad, max_depth,
-    forced_at_cap: bool,
 ):
     leaves: list[tuple[str, list[int]]] = []
     leftover_local: list[int] = []
@@ -144,28 +409,15 @@ def _split_with_labels(
         sub_rows = rows[sub_local]
         sub_global = [indices[j] for j in sub_local]
         sub_prefix = f"{prefix}/{i}"
-        if forced_at_cap:
-            # at depth cap, treat each sub directly as leaf
-            nodes[sub_prefix] = {
-                "size": len(sub_global),
-                "mean_cohesion": _mean_cohesion(sub_rows),
-                "depth": depth + 1,
-                "is_leaf": True,
-                "children": [],
-                "is_leftover": False,
-            }
-            nodes[prefix]["children"].append(sub_prefix)
-            leaves.append((sub_prefix, sub_global))
-        else:
-            sub_leaves = _split_recursive(
-                sub_rows, sub_global,
-                depth=depth + 1, prefix=sub_prefix,
-                leaf_max=leaf_max, leaf_min=leaf_min, target=target,
-                lift=lift, floor=floor, min_grad=min_grad, max_depth=max_depth,
-                nodes=nodes,
-            )
-            nodes[prefix]["children"].append(sub_prefix)
-            leaves.extend(sub_leaves)
+        sub_leaves = _split_recursive(
+            sub_rows, sub_global,
+            depth=depth + 1, prefix=sub_prefix,
+            leaf_max=leaf_max, leaf_min=leaf_min, target=target,
+            lift=lift, floor=floor, min_grad=min_grad, max_depth=max_depth,
+            nodes=nodes,
+        )
+        nodes[prefix]["children"].append(sub_prefix)
+        leaves.extend(sub_leaves)
 
     if leftover_local:
         sub_global = [indices[j] for j in leftover_local]
@@ -229,6 +481,15 @@ def run(top_n: int = 5, neighbor_threshold: float = 0.55) -> dict:
                 n_applied += 1
         print(f"[cluster] applied {n_applied} category overrides from _classify_overrides.json")
 
+    renames = _load_category_renames()
+    if renames:
+        n_renamed = 0
+        for pid, cat in list(post_cat.items()):
+            if cat in renames:
+                post_cat[pid] = renames[cat]
+                n_renamed += 1
+        print(f"[cluster] applied category_renames: {len(renames)} rule(s) → {n_renamed} posts retagged")
+
     # F3' tunable parameters via env vars
     leaf_max = int(os.environ.get("FBPULL_LEAF_MAX", "40"))
     leaf_min = int(os.environ.get("FBPULL_LEAF_MIN", "8"))
@@ -277,6 +538,19 @@ def run(top_n: int = 5, neighbor_threshold: float = 0.55) -> dict:
         nodes[slug]["category_name"] = cat
         for leaf_id, local_indices in leaves:
             clusters[leaf_id] = sorted(pids[i] for i in local_indices)
+
+    # Subdivide large leftover leaves with relaxed thresholds
+    sub_min_size = int(os.environ.get("FBPULL_LEFTOVER_SUBDIVIDE_MIN_SIZE", "30"))
+    sub_leaf_min = int(os.environ.get("FBPULL_LEFTOVER_SUBDIVIDE_LEAF_MIN", "5"))
+    sub_floor = float(os.environ.get("FBPULL_LEFTOVER_SUBDIVIDE_FLOOR", "0.30"))
+    sub_target = int(os.environ.get("FBPULL_LEFTOVER_SUBDIVIDE_TARGET", "12"))
+    n_sub = _subdivide_large_leftovers(
+        clusters, nodes, arr, pid_to_row,
+        min_size=sub_min_size, sub_leaf_min=sub_leaf_min,
+        sub_floor=sub_floor, sub_target=sub_target,
+    )
+    if n_sub:
+        print(f"[cluster] subdivided {n_sub} large leftover(s) (min_size={sub_min_size}, floor={sub_floor})")
 
     # Apply leaf merges (post-F3' manual fixes from _classify_overrides.json)
     merges = _load_leaf_merges()
@@ -329,6 +603,11 @@ def run(top_n: int = 5, neighbor_threshold: float = 0.55) -> dict:
 
         if applied:
             print(f"[cluster] applied {applied} leaf merge(s) from _classify_overrides.json")
+
+    # Apply leaf groups (post-F3' mid-node insertion via majority-membership grouping)
+    grouped = _apply_leaf_groups(clusters, nodes, arr, pid_to_row)
+    if grouped:
+        print(f"[cluster] applied leaf_groups: regrouped {grouped} child(ren) under mid-nodes")
 
     # Sort clusters dict
     for k in clusters:
