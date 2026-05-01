@@ -12,6 +12,7 @@ from . import export as export_mod
 from . import filter as filter_mod
 from . import parse as parse_mod
 from . import report as report_mod
+from . import retrieve as retrieve_mod
 from . import synthesize as synth_mod
 from .paths import ensure_dirs
 
@@ -116,6 +117,28 @@ def report() -> None:
     """Generate cluster analysis report (charts + markdown) under vault `_reports/<date>/`."""
     _bootstrap()
     report_mod.run()
+
+
+@app.command()
+def retrieve(
+    query: str = typer.Argument(..., help="Query string to search for relevant posts"),
+    top_leaves: int = typer.Option(8, "--top-leaves", help="Stage 1: top-K leaves by centroid"),
+    top_posts: int = typer.Option(30, "--top-posts", help="Stage 2: top-N posts overall"),
+    tier: str = typer.Option(
+        None, "--tier",
+        help="Comma-separated importance tiers to keep: core,topic,noise (default = all)",
+    ),
+    scope: str = typer.Option(
+        None, "--scope",
+        help="Comma-separated topic_scope filter: personal-family,personal-life,society-politics,society-issues,industry-tech,industry-academic,industry-management",
+    ),
+) -> None:
+    """Stage 8: query → hybrid 2-stage retrieval → markdown + json under `_intermediate/retrieval/`."""
+    _bootstrap()
+    retrieve_mod.cli_run(
+        query, top_leaves=top_leaves, top_posts=top_posts,
+        tier=tier, scope=scope,
+    )
 
 
 @app.command(name="all")

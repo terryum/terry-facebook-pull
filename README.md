@@ -18,6 +18,8 @@ Facebook DYI export → Obsidian "외장 기억" 파이프라인.
 
 ```
 parse → filter → classify → embed → cluster → synthesize → export
+                                                    ↓
+                                  retrieve  ←  query → 글감 모음
 ```
 
 | Stage | 역할 |
@@ -29,6 +31,7 @@ parse → filter → classify → embed → cluster → synthesize → export
 | cluster | HDBSCAN 으로 진짜 반복 사고만 묶기 + 코사인 top-N 이웃 그래프 |
 | synthesize | Sonnet 이 cluster → 컨셉 노트 작성 |
 | export | Archive/Synthesized 마크다운 작성 |
+| retrieve | query 1 줄 → top-K leaf + top-N posts (글감 검색, /write 의 input) |
 
 자세한 데이터 스키마는 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 참조.
 
@@ -72,6 +75,23 @@ fbpull all                        # 전체 파이프라인
 fbpull parse                      # 단계별 디버깅도 가능
 fbpull all --no-llm               # 결정적 stub 으로 (오프라인/CI)
 ```
+
+### 5. Retrieve (글감 검색)
+
+Synthesize·Export 후 query 로 책 챕터 source 를 모을 수 있습니다.
+
+```bash
+fbpull retrieve "리더십" --tier core             # universal lesson 만
+fbpull retrieve "AI 산업" --scope industry-tech  # 특정 챕터 자료
+fbpull retrieve "전환점" --top-leaves 10 --top-posts 50
+```
+
+옵션:
+- `--tier core,topic,noise` — importance tier 필터 (default: 모두)
+- `--scope <list>` — multi-label scope 필터 (`personal-family`, `personal-life`, `society-politics`, `society-issues`, `industry-tech`, `industry-academic`, `industry-management`)
+- 결과: `_intermediate/retrieval/<query-slug>.{md,json}`
+
+각 leaf 는 cross-category **theme axis** (CV-validated agglomerative clustering) 의 top-3 멤버십을 함께 표시 — 책 챕터 묶을 때 활용.
 
 ## Costs
 
