@@ -89,17 +89,17 @@ def _chart_posts_per_category(stats: dict, img_dir: Path) -> str:
     strict = [v["is_strict"] for _, v in items]
     total_posts = sum(posts)
 
-    fig, ax = plt.subplots(figsize=(10, 5.5))
+    fig, ax = plt.subplots(figsize=(6.5, 7.5))
     colors = ["#999" if s else "#3b82f6" for s in strict]
     bars = ax.barh(names, posts, color=colors)
-    for bar, n_leaves, n_posts in zip(bars, leaves, posts):
+    for bar, n_posts in zip(bars, posts):
         pct = 100 * n_posts / total_posts
         ax.text(n_posts + 10, bar.get_y() + bar.get_height() / 2,
-                f"{n_posts} posts · {n_leaves} leaves · {pct:.1f}%",
-                va="center", fontsize=8.5, color="#444")
+                f"{n_posts} posts · {pct:.1f}%",
+                va="center", fontsize=9, color="#444")
     ax.invert_yaxis()
     ax.set_xlabel("keep_for_synthesis posts")
-    ax.set_title(f"카테고리별 글 수·leaf 수 (총 {total_posts:,} posts, 회색 = strict)")
+    ax.set_title(f"카테고리별 글 수 (총 {total_posts:,} posts, 회색 = strict)")
     name = "01_posts_per_category.png"
     _save(fig, img_dir / name)
     return name
@@ -329,6 +329,36 @@ def _chart_top_leaves_heatmap(ts: dict, stats: dict, img_dir: Path) -> str:
     return name
 
 
+def _chart_category_pie(stats: dict, img_dir: Path) -> str:
+    """Pie chart showing each category's share of total posts.
+    Slice labels show category name + % + post count. Sorted by size desc."""
+    cats = stats["categories"]
+    items = sorted(cats.items(), key=lambda x: -x[1]["posts"])
+    names = [v["name"] for _, v in items]
+    posts = [v["posts"] for _, v in items]
+    total = sum(posts)
+
+    cmap = plt.get_cmap("tab20")
+    colors = [cmap(i % 20) for i in range(len(items))]
+
+    fig, ax = plt.subplots(figsize=(9, 7))
+    labels = [f"{n}\n{p:,} ({100 * p / total:.1f}%)" for n, p in zip(names, posts)]
+    wedges, _ = ax.pie(
+        posts,
+        labels=labels,
+        colors=colors,
+        startangle=90,
+        counterclock=False,
+        labeldistance=1.08,
+        wedgeprops={"edgecolor": "white", "linewidth": 1.5},
+        textprops={"fontsize": 8.5},
+    )
+    ax.set_title(f"카테고리별 글 비율 (총 {total:,} posts, {len(items)} 카테고리)")
+    name = "09_category_pie.png"
+    _save(fig, img_dir / name)
+    return name
+
+
 def _chart_per_category_summary(stats: dict, img_dir: Path) -> str:
     """Posts vs leaves per category, scatter with size = leaf_size_mean."""
     cats = stats["categories"]
@@ -476,6 +506,7 @@ def run() -> Path:
     img6 = _chart_time_series_categories_lines(ts, img_dir)
     img7 = _chart_top_leaves_heatmap(ts, stats, img_dir)
     img8 = _chart_per_category_summary(stats, img_dir)
+    img9 = _chart_category_pie(stats, img_dir)
 
     # TF-IDF keywords per leaf (one pass over all leaves)
     by_leaf_texts: dict[str, list[str]] = {}
@@ -502,6 +533,9 @@ def run() -> Path:
     md.append("### 카테고리별 요약 표\n")
     md.append(_build_summary_table(stats))
     md.append("\n")
+
+    md.append(f"![]({Path('img') / img9})\n")
+    md.append("→ 카테고리별 글 비율 (전체 대비). 위 표와 동일 데이터를 한 눈에 비교.\n")
 
     md.append("## 1. 분포 개요\n")
     md.append(f"![]({Path('img') / img1})\n")
