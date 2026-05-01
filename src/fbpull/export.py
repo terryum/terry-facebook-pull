@@ -116,6 +116,20 @@ def run() -> dict[str, int]:
             for pid in members:
                 cluster_for[pid] = None if n < 0 else cid_str
 
+    # Importance + theme metadata (Step 5/8 outputs)
+    overrides_path = fb_root() / "_classify_overrides.json"
+    post_importance: dict[str, dict] = {}
+    if overrides_path.exists():
+        ovr_data = json.loads(overrides_path.read_text(encoding="utf-8"))
+        post_importance = ovr_data.get("post_importance", {})
+
+    leaf_themes_data: dict = {}
+    leaf_themes_path = intermediate_dir() / "leaf_themes.json"
+    if leaf_themes_path.exists():
+        leaf_themes_data = json.loads(leaf_themes_path.read_text(encoding="utf-8"))
+    theme_meta = leaf_themes_data.get("theme_meta", {})
+    leaf_themes_raw = leaf_themes_data.get("leaf_themes", {})
+
     neighbors: dict[str, list[dict]] = {}
     if neighbors_path.exists():
         neighbors = json.loads(neighbors_path.read_text(encoding="utf-8"))
@@ -171,6 +185,15 @@ def run() -> dict[str, int]:
         if cat_obj and cat_obj.sensitive:
             tags.append("sensitive")
 
+        # Importance tier + scope per post
+        imp = post_importance.get(rec["post_id"], {})
+        post_tier = imp.get("tier")
+        post_scope = imp.get("topic_scope") or []
+        if post_tier:
+            tags.append(f"tier-{post_tier}")
+        for sc in post_scope:
+            tags.append(f"scope-{sc}")
+
         meta: dict[str, Any] = {
             "type": "archive",
             "source": "facebook",
@@ -181,6 +204,8 @@ def run() -> dict[str, int]:
             "category": cat_name,
             "era": era,
             "cluster_id": cid_str,
+            "tier": post_tier,
+            "topic_scope": post_scope,
             "tags": tags,
         }
         if cat_obj and cat_obj.strict:
@@ -211,6 +236,10 @@ def run() -> dict[str, int]:
         tag = rec.get("primary_tag") or ""
         cat_name = rec.get("category", "")
         cat_obj = cat_by_name.get(cat_name)
+        leaf_tier = rec.get("leaf_tier")
+        leaf_scope = rec.get("leaf_scope") or []
+        themes = rec.get("themes") or []
+
         tags = ["facebook", "synthesized"]
         if cat_obj:
             tags.append(cat_obj.slug)
@@ -220,6 +249,11 @@ def run() -> dict[str, int]:
                 tags.append(slug_tag)
         if rec.get("sensitive"):
             tags.append("sensitive")
+        if leaf_tier:
+            tags.append(f"leaf-{leaf_tier}")
+        for sc in leaf_scope:
+            tags.append(f"scope-{sc}")
+
         meta = {
             "type": "synthesized",
             "source": "facebook",
@@ -228,14 +262,28 @@ def run() -> dict[str, int]:
             "cluster_id": rec["cluster_id"],
             "category": cat_name,
             "member_count": len(rec["member_post_ids"]),
+            "leaf_tier": leaf_tier,
+            "leaf_scope": leaf_scope,
+            "member_tier_distribution": rec.get("member_tier_distribution") or {},
+            "themes": [
+                {"id": t.get("theme_id"), "name": t.get("name"), "score": round(float(t.get("score", 0)), 3)}
+                for t in themes
+            ],
             "tags": tags,
         }
         if rec.get("sensitive"):
             meta["sensitive"] = True
-        body = f"# {rec['title']}\n\n{rec['body']}\n\n## 멤버 글\n"
+        body_lines = [f"# {rec['title']}", "", rec["body"], ""]
+        if themes:
+            body_lines.append("## 관련 themes (cross-category axis)")
+            for t in themes:
+                body_lines.append(f"- {t.get('name')} (`{t.get('theme_id')}`, score={t.get('score', 0):.2f})")
+            body_lines.append("")
+        body_lines.append("## 멤버 글")
         for pid in rec["member_post_ids"]:
             if pid in name_for:
-                body += f"- [[{name_for[pid]}]]\n"
+                body_lines.append(f"- [[{name_for[pid]}]]")
+        body = "\n".join(body_lines)
         write_note(synthesized_dir() / f"{slug}.md", meta, body)
         synth_index.append(
             {

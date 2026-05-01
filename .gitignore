@@ -25,6 +25,7 @@ htmlcov/
 .ruff_cache/
 .mypy_cache/
 .DS_Store
+.claude/
 
 # Data — must NEVER end up in this public repo.
 # Real Facebook data lives in the Obsidian vault, not here.
