@@ -141,6 +141,24 @@ def retrieve(
     )
 
 
+@app.command(name="open")
+def open_note(
+    target: str = typer.Argument(
+        ...,
+        help=(
+            "Facebook post id, absolute note path, or vault-relative note path "
+            "to open in Obsidian"
+        ),
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the Obsidian URI without opening"),
+) -> None:
+    """Open an archived Facebook note in Obsidian."""
+    _bootstrap()
+    note = retrieve_mod.open_in_obsidian(target, dry_run=dry_run)
+    print(f"[open] {note['obsidian_uri']}")
+    print(f"[open] {note['archive_path']}")
+
+
 @app.command(name="all")
 def run_all(
     no_llm: bool = typer.Option(False, "--no-llm", help="Use deterministic stubs (offline/CI)"),

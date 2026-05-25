@@ -13,15 +13,18 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from collections import Counter
 from pathlib import Path
+from urllib.parse import urlencode
 
 import numpy as np
 
 from . import embed as embed_mod
 from . import llm
 from . import taxonomy as taxonomy_mod
-from .paths import fb_root, intermediate_dir
+from .export import _archive_basename, _unique_name
+from .paths import archive_dir, fb_root, intermediate_dir
 
 
 _ILSANG_MIDS = {"diary", "exercise", "canada", "sns", "english"}
@@ -89,6 +92,68 @@ def _load_post_meta() -> dict[str, dict]:
     return out
 
 
+def _obsidian_open_uri(path: str | Path) -> str:
+    return "obsidian://open?" + urlencode({"path": str(Path(path).expanduser().resolve())})
+
+
+def _load_archive_note_index() -> dict[str, dict[str, str]]:
+    """Reconstruct the stable Archive filenames produced by `fbpull export`."""
+    p = intermediate_dir() / "02_filtered.jsonl"
+    if not p.exists():
+        return {}
+
+    kept: list[dict] = []
+    with p.open(encoding="utf-8") as f:
+        for line in f:
+            rec = json.loads(line)
+            if rec.get("kept"):
+                kept.append(rec)
+
+    kept.sort(key=lambda r: (r["date"], r["post_id"]))
+    used_names: set[str] = set()
+    out: dict[str, dict[str, str]] = {}
+    for rec in kept:
+        name = _unique_name(_archive_basename(rec), used_names)
+        note_path = archive_dir() / f"{name}.md"
+        out[rec["post_id"]] = {
+            "archive_note": name,
+            "archive_relpath": f"Private/Facebook/Archive/{name}.md",
+            "archive_path": str(note_path),
+            "obsidian_uri": _obsidian_open_uri(note_path),
+        }
+    return out
+
+
+def _resolve_archive_target(target: str) -> dict[str, str]:
+    """Resolve a Facebook post id, absolute path, or vault-relative path."""
+    p = Path(target).expanduser()
+    if p.is_absolute():
+        note_path = p
+    elif "/" in target or target.endswith(".md"):
+        note_path = fb_root().parents[1] / target
+    else:
+        note = _load_archive_note_index().get(target)
+        if not note:
+            raise FileNotFoundError(f"No archived Facebook note found for post id: {target}")
+        return note
+
+    return {
+        "archive_note": note_path.stem,
+        "archive_relpath": str(note_path.relative_to(fb_root().parents[1]))
+        if note_path.is_relative_to(fb_root().parents[1])
+        else str(note_path),
+        "archive_path": str(note_path),
+        "obsidian_uri": _obsidian_open_uri(note_path),
+    }
+
+
+def open_in_obsidian(target: str, dry_run: bool = False) -> dict[str, str]:
+    note = _resolve_archive_target(target)
+    if not dry_run:
+        subprocess.run(["open", note["obsidian_uri"]], check=True)
+    return note
+
+
 def _load_clusters() -> dict[str, list[str]]:
     p = intermediate_dir() / "05_clusters.json"
     return json.loads(p.read_text(encoding="utf-8"))
@@ -152,6 +217,7 @@ def run(
     slug_to_name = _slug_to_name()
     post_importance = _load_post_importance()
     leaf_themes_index = _load_leaf_themes_index()
+    archive_note_index = _load_archive_note_index()
 
     qvec, model = _embed_query(query)
     if qvec.shape[0] != arr.shape[1]:
@@ -216,6 +282,7 @@ def run(
         cat_slug = leaf_id.split("/")[0]
         cat_name = slug_to_name.get(cat_slug, m.get("category", cat_slug))
         imp = post_importance.get(pid, {})
+        note = archive_note_index.get(pid, {})
         post_records.append(
             {
                 "post_id": pid,
@@ -227,6 +294,10 @@ def run(
                 "ilsang_mid": _ilsang_mid_for(leaf_id),
                 "tier": imp.get("tier"),
                 "topic_scope": imp.get("topic_scope") or [],
+                "archive_note": note.get("archive_note"),
+                "archive_relpath": note.get("archive_relpath"),
+                "archive_path": note.get("archive_path"),
+                "obsidian_uri": note.get("obsidian_uri"),
                 "snippet": snippet,
             }
         )
@@ -339,6 +410,10 @@ def write_outputs(result: dict, out_dir: Path | None = None) -> tuple[Path, Path
             f"### [{r['date']}] {r['era']} · {r['category']}{flag_str}"
         )
         lines.append(f"_score={r['score']:.3f} · leaf=`{r['leaf_id']}` · pid=`{r['post_id']}`_")
+        if r.get("obsidian_uri"):
+            lines.append(f"[Obsidian에서 열기]({r['obsidian_uri']})")
+            lines.append("")
+            lines.append(f"`{r['archive_path']}`")
         lines.append("")
         lines.append(r["snippet"] + ("…" if len(r["snippet"]) >= 240 else ""))
         lines.append("")
